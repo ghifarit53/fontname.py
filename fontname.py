@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # ==========================================================================
-# fontname.py
+# fontname.py (modified for output files)
 # Copyright 2019 Christopher Simpkins
 # MIT License
 #
@@ -11,45 +11,55 @@
 #         - install with `pip3 install fonttools`
 #
 # Usage:
-#   python3 fontname.py [FONT FAMILY NAME] [FONT PATH 1] <FONT PATH ...>
+#   python3 fontname.py "Font Family:Weight" path/to/font.{ttf,otf} \
+#                       "Font Family:Weight" path/to/font.{ttf,otf}
 #
 # Notes:
-#   Use quotes around font family name arguments that include spaces
+#   - Quotes required if family or weight contains spaces
+#   - Multiple family/font pairs supported in one run
+#   - Output is saved as: NewFontFamily-Weight.{ttf,otf}
 # ===========================================================================
 
 import os
 import sys
-
 from fontTools import ttLib
 
 
 def main(argv):
-    # command argument tests
     print(" ")
-    if len(argv) < 2:
-        sys.stderr.write(
-            f"[fontname.py] ERROR: you did not include enough arguments to the script.{os.linesep}"
-        )
-        sys.stderr.write(
-            f"Usage: python3 fontname.py [FONT FAMILY NAME] [FONT PATH 1] <FONT PATH ...>{os.linesep}"
-        )
-        sys.exit(1)
 
-    # begin parsing command line arguments
-    try:
-        font_name = str(argv[0])  # the first argument is the new typeface name
-    except Exception as e:
+    # Check args length (must be even: family+style, font path)
+    if len(argv) < 2 or len(argv) % 2 != 0:
         sys.stderr.write(
-            f"[fontname.py] ERROR: Unable to convert argument to string. {e}{os.linesep}"
+            f"[fontname.py] ERROR: arguments must be pairs of \"Font Family:Weight\" and font path.{os.linesep}"
+        )
+        sys.stderr.write(
+            f"Usage: python3 fontname.py \"Font Family:Weight\" path/to/font.{ttf,otf} ...{os.linesep}"
         )
         sys.exit(1)
 
-    # all remaining arguments on command line are file paths to fonts
-    font_path_list = argv[1:]
+    # Process in pairs
+    for i in range(0, len(argv), 2):
+        try:
+            family_style = str(argv[i])
+            font_path = argv[i + 1]
+        except Exception as e:
+            sys.stderr.write(
+                f"[fontname.py] ERROR: Unable to parse arguments. {e}{os.linesep}"
+            )
+            sys.exit(1)
 
-    # iterate through all paths provided on command line and rename to `font_name` defined by user
-    for font_path in font_path_list:
-        # test for existence of font file on requested file path
+        # Split family and style
+        if ":" not in family_style:
+            sys.stderr.write(
+                f"[fontname.py] ERROR: '{family_style}' must be in 'Font Family:Weight' format.{os.linesep}"
+            )
+            sys.exit(1)
+
+        font_name, style = family_style.split(":", 1)
+        font_name, style = font_name.strip(), style.strip()
+
+        # Verify font file exists
         if not file_exists(font_path):
             sys.stderr.write(
                 f"[fontname.py] ERROR: the path '{font_path}' does not appear to be a valid file path.{os.linesep}"
@@ -59,70 +69,55 @@ def main(argv):
         tt = ttLib.TTFont(font_path)
         namerecord_list = tt["name"].names
 
-        style = ""
+        # Strings to update
+        postscript_font_name = font_name.replace(" ", "")
+        nameID1_string = font_name
+        nameID16_string = font_name
+        nameID4_string = f"{font_name} {style}"
+        nameID6_string = f"{postscript_font_name}-{style.replace(' ', '')}"
 
-        # determine font style for this file path from name record nameID 2
+        # Update OpenType name records
         for record in namerecord_list:
-            if record.nameID == 2:
-                style = str(record)
-                break
+            if record.nameID == 1:
+                record.string = nameID1_string
+            elif record.nameID == 4:
+                record.string = nameID4_string
+            elif record.nameID == 6:
+                record.string = nameID6_string
+            elif record.nameID == 16:
+                record.string = nameID16_string
+            elif record.nameID == 2:  # Style name
+                record.string = style
 
-        # test that a style name was found in the OpenType tables of the font
-        if len(style) == 0:
-            sys.stderr.write(
-                f"[fontname.py] Unable to detect the font style from the OpenType name table in '{font_path}'. {os.linesep}"
-            )
-            sys.stderr.write("Unable to complete execution of the script.")
-            sys.exit(1)
-        else:
-            # used for the Postscript name in the name table (no spaces allowed)
-            postscript_font_name = font_name.replace(" ", "")
-            # font family name
-            nameID1_string = font_name
-            nameID16_string = font_name
-            # full font name
-            nameID4_string = f"{font_name} {style}"
-            # Postscript name
-            # - no spaces allowed in family name or the PostScript suffix. should be dash delimited
-            nameID6_string = f"{postscript_font_name}-{style.replace(' ', '')}"
-            # nameID6_string = postscript_font_name + "-" + style.replace(" ", "")
+        # CFF table naming (if present)
+        if "CFF " in tt:
+            try:
+                cff = tt["CFF "]
+                cff.cff[0].FamilyName = nameID1_string
+                cff.cff[0].FullName = nameID4_string
+                cff.cff.fontNames = [nameID6_string]
+            except Exception as e:
+                sys.stderr.write(
+                    f"[fontname.py] ERROR: unable to write new names to CFF table: {e}"
+                )
 
-            # modify the opentype table data in memory with updated values
-            for record in namerecord_list:
-                if record.nameID == 1:
-                    record.string = nameID1_string
-                elif record.nameID == 4:
-                    record.string = nameID4_string
-                elif record.nameID == 6:
-                    record.string = nameID6_string
-                elif record.nameID == 16:
-                    record.string = nameID16_string
+        # Build new filename
+        ext = os.path.splitext(font_path)[1]
+        safe_style = style.replace(" ", "")
+        new_filename = f"{postscript_font_name}-{safe_style}{ext}"
 
-            # CFF table naming for CFF fonts (only)
-            if "CFF " in tt:
-                try:
-                    cff = tt["CFF "]
-                    cff.cff[0].FamilyName = nameID1_string
-                    cff.cff[0].FullName = nameID4_string
-                    cff.cff.fontNames = [nameID6_string]
-                except Exception as e:
-                    sys.stderr.write(
-                        f"[fontname.py] ERROR: unable to write new names to CFF table: {e}"
-                    )
-
-        # write changes to the font file
+        # Save updated font as new file
         try:
-            tt.save(font_path)
-            print(f"[OK] Updated '{font_path}' with the name '{nameID4_string}'")
+            tt.save(new_filename)
+            print(
+                f"[OK] Saved '{new_filename}' with family '{font_name}' and style '{style}'"
+            )
         except Exception as e:
             sys.stderr.write(
-                f"[fontname.py] ERROR: unable to write new name to OpenType name table for '{font_path}'. {os.linesep}"
+                f"[fontname.py] ERROR: unable to save new font file '{new_filename}'. {os.linesep}"
             )
             sys.stderr.write(f"{e}{os.linesep}")
             sys.exit(1)
-
-
-# Utilities
 
 
 def file_exists(filepath):
